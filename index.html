@@ -123,7 +123,7 @@ input[type=file]{display:none}
       <li>Walk the wall in the direction of travel. Count footage from zero (one barrier unit is about 12.5 ft).</li>
       <li>Check every unit. Only write down units that FAIL.</li>
       <li>Take one photo per failed unit. Say the footage out loud first so photos match the log.</li>
-      <li>At the end, write down your end station or landmark and text me the log.</li>
+      <li>At the end, write down your end station or landmark. Text the log, or tap Download PDF for a one-photo-per-page report.</li>
     </ol>
   </details>
   <details class="card"><summary>Settings (optional)</summary>
@@ -216,6 +216,7 @@ input[type=file]{display:none}
   <a class="btn block" id="mail" href="mailto:">✉ Email</a>
   <button class="block" id="copy">📋 Copy to clipboard</button>
   <button class="block" id="csv">⬇ Download CSV</button>
+  <button class="block" id="pdf">⬇ Download PDF</button>
   <div class="hint" id="finHint"></div>
   <label class="f" for="endSta">End station (auto from last unit — edit to override)</label>
   <input type="text" id="endSta" autocomplete="off">
@@ -282,6 +283,7 @@ input[type=file]{display:none}
 </div></div>
 <div class="toast" id="toast" hidden></div>
 
+<script src="pdf-report.js"></script>
 <script>
 (function(){
 "use strict";
@@ -841,7 +843,7 @@ function renderFin(keepInputs){
   $("msg").textContent=buildMsg();$("sms").setAttribute("href",smsHref());$("mail").setAttribute("href",mailHref());
   var ph=S.entries.filter(function(e){return e.thumb}).length,canShare=!!navigator.share;
   $("share").style.display=canShare?"flex":"none";
-  $("finHint").textContent=(canShare?"Share sheet attaches "+ph+" photo thumbnail"+(ph===1?"":"s")+" when your phone supports it. ":"Share sheet isn't available in this browser — use Text or Copy. ")+"Text and Email send words only (no photos)."+(S.phone||S.email?"":" Add the supervisor phone/email under Setup → Settings to address them automatically.");
+  $("finHint").textContent=(canShare?"Share sheet attaches "+ph+" photo thumbnail"+(ph===1?"":"s")+" when your phone supports it. ":"Share sheet isn't available in this browser — use Text or Copy. ")+"Text and Email send words only (no photos). Download PDF is one letter page per fail, up to "+(window.TBWPdf?TBWPdf.MAX_PHOTOS:40)+" photos."+(S.phone||S.email?"":" Add the supervisor phone/email under Setup → Settings to address them automatically.");
   updNav();
 }
 function dataToFile(du,name){var p=du.split(","),m=/:(.*?);/.exec(p[0])[1],bin=atob(p[1]),a=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)a[i]=bin.charCodeAt(i);return new File([a],name,{type:m})}
@@ -853,6 +855,92 @@ $("share").onclick=function(){
 };
 $("copy").onclick=function(){copyText(buildMsg())};
 $("csv").onclick=function(){saveCsv(buildCsv(),"barrier-log-"+(S.date||"check")+".csv")};
+
+/* ---------- photo PDF (offline, one letter page per fail) ---------- */
+function dataUrlToBytes(du){
+  var i=String(du||"").indexOf(","); if(i<0)return null;
+  var bin; try{bin=atob(du.slice(i+1))}catch(e){return null}
+  var a=new Uint8Array(bin.length); for(var k=0;k<bin.length;k++)a[k]=bin.charCodeAt(k)&255; return a;
+}
+function collectPdfFails(){
+  return sorted().map(function(e){
+    var d=DEFS.filter(function(x){return e.defects.indexOf(x.k)>=0}).map(function(x){return x.label}).join("; ");
+    var sz=(e.size===""||e.size==null)?"":(e.size+" in");
+    var loc=locText(e.loc);
+    var unit="Unit "+unitLabel(e), lt=isLot()?lotFor(e.unit):null;
+    if(lt)unit="Lot "+lt.n+" | "+unit;
+    return {jpeg:e.thumb?dataUrlToBytes(e.thumb):null, staText:staTxt(entrySta(e)), unitText:unit, defectsText:d, sizeText:sz, locText:loc==="-"?"":loc, note:e.note||"", priority:isPri(e)};
+  });
+}
+function blobToBytes(blob, cb){
+  var r=new FileReader();
+  r.onload=function(){cb(new Uint8Array(r.result))};
+  r.onerror=function(){cb(null)};
+  r.readAsArrayBuffer(blob);
+}
+function compressJpegBytes(bytes, cb){
+  var url=URL.createObjectURL(new Blob([bytes],{type:"image/jpeg"})), img=new Image();
+  img.onload=function(){
+    var edge=1400, w=img.naturalWidth||1, h=img.naturalHeight||1, s=Math.min(1, edge/Math.max(w,h));
+    var c=document.createElement("canvas"); c.width=Math.max(1,Math.round(w*s)); c.height=Math.max(1,Math.round(h*s));
+    var g=c.getContext("2d"); g.fillStyle="#fff"; g.fillRect(0,0,c.width,c.height); g.drawImage(img,0,0,c.width,c.height);
+    URL.revokeObjectURL(url);
+    c.toBlob(function(b){ if(!b){cb(bytes);return} blobToBytes(b,function(out){cb(out&&out.length?out:bytes)}) }, "image/jpeg", 0.72);
+  };
+  img.onerror=function(){URL.revokeObjectURL(url); cb(null)};
+  img.src=url;
+}
+function compressPdfFails(fails, cb){
+  var i=0;
+  (function step(){
+    if(i>=fails.length){cb(fails);return}
+    var f=fails[i++];
+    if(!f.jpeg||f.jpeg.length<=350000){step();return}
+    compressJpegBytes(f.jpeg, function(out){ f.jpeg=out; step(); });
+  })();
+}
+function deliverPdf(bytes, filename, note, done){
+  var blob=new Blob([bytes],{type:"application/pdf"});
+  var file=null; try{file=new File([blob], filename, {type:"application/pdf"})}catch(e){}
+  function finish(msg){ toast(msg); if(done)done(); }
+  function linked(){
+    var u=URL.createObjectURL(blob), a=document.createElement("a");
+    a.href=u; a.download=filename; document.body.appendChild(a); a.click();
+    setTimeout(function(){document.body.removeChild(a); URL.revokeObjectURL(u)}, 4000);
+    finish((note?note+" ":"")+"PDF downloaded");
+  }
+  if(file&&navigator.share){
+    var data={files:[file], title:filename}, can=false;
+    try{can=!navigator.canShare||navigator.canShare(data)}catch(e){can=false}
+    if(can){
+      navigator.share(data).then(function(){finish((note?note+" ":"")+"PDF ready — save it from the share sheet")}, function(err){
+        if(err&&err.name==="AbortError"){ if(done)done(); return; }
+        linked();
+      });
+      return;
+    }
+  }
+  linked();
+}
+function downloadCurrentPdf(){
+  var lib=window.TBWPdf;
+  if(!lib){toast("PDF builder didn't load. Open the app once while online, then it works offline."); return}
+  var fails=collectPdfFails();
+  if(!fails.length){toast("No fails logged yet. Flag a unit, then download the photo PDF."); return}
+  var btn=$("pdf"); if(btn)btn.disabled=true;
+  function enable(){ if(btn)btn.disabled=false; }
+  function go(list){
+    try{
+      var built=lib.pagesFromFails(list,{section:S.section, dateText:fmtDate(S.date), name:S.name||""});
+      var bytes=lib.buildPhotoPdf({pages:built.pages});
+      var note=built.truncated?("First "+built.pages.length+" fails only (limit "+lib.MAX_PHOTOS+")."):"";
+      deliverPdf(bytes, lib.pdfFilename(S.section, S.date), note, enable);
+    }catch(err){ toast("Couldn't build the PDF"); enable(); }
+  }
+  if(fails.some(function(f){return f.jpeg&&f.jpeg.length>350000})){toast("Compressing photos…"); compressPdfFails(fails, go); return}
+  go(fails);
+}
+$("pdf").onclick=downloadCurrentPdf;
 
 /* ---------- history ---------- */
 var HV=null;
@@ -868,6 +956,7 @@ function histDraw(){
       '<a class="btn block" href="'+esc(smsHref(r.msg))+'">💬 Text message</a>'+
       '<a class="btn block" href="'+esc(mailHref(r.msg,"Temporary Barrier Wall "+fmtDate(r.date)+(r.section?" - "+r.section:"")))+'">✉ Email</a>'+
       '<button class="block" data-a="csv">⬇ Download CSV</button>'+
+      '<button class="block" data-a="pdf">⬇ Download PDF</button>'+
       '<button class="block" data-a="del">🗑 Delete this past check</button>'+
       '<button class="block" data-a="back">← Back to list</button>';
   }else if(!H.length){
@@ -887,6 +976,7 @@ $("hsBody").addEventListener("click",function(e){
   if(a==="copy")copyText(r.msg);
   if(a==="share")shareIt("Temporary Barrier Wall "+fmtDate(r.date),r.msg);
   if(a==="csv")saveCsv(r.csv,"barrier-log-"+(r.date||"check")+".csv");
+  if(a==="pdf")toast("Past checks keep the text and CSV only — photos aren't stored, so the photo PDF can't be rebuilt. Download it from Finish before you start a new check.");
   if(a==="del"&&confirm("Delete this past check from History? This can't be undone.")){saveHist(H.filter(function(x){return x.id!==HV}));HV=null;histDraw();refreshHistBtn()}
 });
 $("hsClose").onclick=function(){$("histSheet").hidden=true};
@@ -897,7 +987,7 @@ $("histBtn").onclick=histOpen;$("histBtn2").onclick=histOpen;
 var GSTEPS=[
  {t:"1 · Set up (30 seconds)",b:"Open <b>Setup</b>. Type your name and your <b>start station</b> (like <b>20+05</b>) — that point is zero. Leave <b>Lots</b> mode on: every unit counts as PASS unless you flag it."},
  {t:"2 · Walk and flag only the bad ones",b:"The big number is your current unit. Tap <b>+</b> as you pass units (or tap a unit in the grid). When one fails: tap red <b>FAIL</b> → tap what's wrong → <b>Save</b>. Add a photo (say the footage out loud first). <b>Base unstable = call your supervisor right away.</b>"},
- {t:"3 · Close the lot and send",b:"At the end of a lot tap <b>Close lot</b>, then <b>Start next lot</b>. When you're done, open <b>Finish</b> and tap <b>Send log</b> (or Text / Email / Copy). It saves itself — closing the tab never loses your work."}
+ {t:"3 · Close the lot and send",b:"At the end of a lot tap <b>Close lot</b>, then <b>Start next lot</b>. When you're done, open <b>Finish</b> and tap <b>Send log</b> or <b>Download PDF</b> (one photo per page). It saves itself — closing the tab never loses your work."}
 ];
 var gi=0;
 function gDraw(){
@@ -929,7 +1019,7 @@ var seen=false;try{seen=localStorage.getItem(GKEY)==="1"}catch(x){}
 if(!seen&&!hasData())gOpen();
 else if(hasData()){var wl=curLotSafe();toast("Welcome back — your check was restored"+(wl?" ("+wl+")":""))}
 function curLotSafe(){try{if(isLot()){var l=curLot();return "Lot "+l.n+", unit "+(S.cur-l.first+1)}return "unit "+S.cur}catch(x){return ""}}
-window.__app={get state(){return S},buildMsg:buildMsg,buildCsv:buildCsv,parseSta:parseSta,fmtSta:fmtSta};
+window.__app={get state(){return S},buildMsg:buildMsg,buildCsv:buildCsv,parseSta:parseSta,fmtSta:fmtSta,collectPdfFails:collectPdfFails,downloadCurrentPdf:downloadCurrentPdf};
 })();
 
 </script>
