@@ -50,6 +50,40 @@ assert.strictEqual(TBW.photoCaption(0, "Sta 1923+12.50"), "Photo 01 | Sta 1923+1
 assert.strictEqual(TBW.pdfFilename("1923", "2026-11-10"), "barrier-wall-check-1923-2026-11-10.pdf");
 assert.strictEqual(TBW.pdfFilename("Section 1923", "2026-11-10"), "barrier-wall-check-1923-2026-11-10.pdf");
 assert.strictEqual(TBW.pdfFilename("NB outside wall", "2026-11-10"), "barrier-wall-check-nb-outside-wall-2026-11-10.pdf");
+assert.strictEqual(TBW.photoCaption(0, "Sta 1923+12.50"), "Photo 01 | Sta 1923+12.50");
+assert.strictEqual(TBW.photoFileName(0, "Sta 1923+12.50"), "Photo-01_Sta-1923+12.50.jpg");
+assert.strictEqual(TBW.photoFileName(17, "Sta 1942+00.00"), "Photo-18_Sta-1942+00.00.jpg");
+var nums = TBW.assignPhotoNums([
+  {id: 1, hasImage: true},
+  {id: 2, hasImage: false},
+  {id: 3, hasImage: true}
+]);
+assert.strictEqual(nums[1], 1);
+assert.strictEqual(nums[2], undefined);
+assert.strictEqual(nums[3], 2);
+var mixed = TBW.pagesFromFails([
+  {jpeg: TINY_JPEG, staText: "Sta 1923+12.50", photoNum: 1, caption: "Photo 01 | Sta 1923+12.50"},
+  {staText: "Sta 1923+25.00", caption: "No photo | Sta 1923+25.00"},
+  {jpeg: TINY_JPEG, staText: "Sta 1924+00.00", photoNum: 2, caption: "Photo 02 | Sta 1924+00.00"}
+], {section: "1923", dateText: "11/10/2026", name: "Aide"});
+var mixedRaw = Buffer.from(TBW.buildPhotoPdf({pages: mixed.pages})).toString("latin1");
+assert.strictEqual(pageCount(mixedRaw), 3);
+assert.ok(mixedRaw.indexOf("Photo 01 | Sta 1923+12.50") >= 0);
+assert.ok(mixedRaw.indexOf("Photo 02 | Sta 1924+00.00") >= 0);
+assert.ok(mixedRaw.indexOf("No photo | Sta 1923+25.00") >= 0);
+
+var Zip = require("../zip-store.js");
+var packed = Zip.zipStore([
+  {name: "Photo-01_Sta-1923+12.50.jpg", data: TINY_JPEG},
+  {name: "Photo-02_Sta-1924+00.00.jpg", data: TINY_JPEG}
+]);
+var zipPath = path.join(__dirname, ".sample-photos.zip");
+fs.writeFileSync(zipPath, Buffer.from(packed));
+var listed = execFileSync("python3", ["-c", "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); print('\\n'.join(z.namelist())); print(z.read(z.namelist()[0])[:2])", zipPath], {encoding: "utf8"});
+assert.ok(listed.indexOf("Photo-01_Sta-1923+12.50.jpg") >= 0, listed);
+assert.ok(listed.indexOf("Photo-02_Sta-1924+00.00.jpg") >= 0, listed);
+assert.ok(listed.indexOf("b'\\xff\\xd8'") >= 0, "zipped jpeg should still start with FFD8: " + listed);
+fs.unlinkSync(zipPath);
 
 var bytes = TBW.buildPhotoPdf({pages: built.pages});
 assert.strictEqual(Buffer.from(bytes.slice(0, 8)).toString("latin1"), "%PDF-1.4");
@@ -87,17 +121,22 @@ var root = path.join(__dirname, "..");
 var html = fs.readFileSync(path.join(root, "index.html"), "utf8");
 var sw = fs.readFileSync(path.join(root, "sw.js"), "utf8");
 assert.ok(html.indexOf('src="pdf-report.js"') >= 0, "app should load the local PDF builder");
+assert.ok(html.indexOf('src="zip-store.js"') >= 0, "app should load the local zip packer");
 assert.ok(html.indexOf('id="pdf"') >= 0 && html.indexOf("Download PDF") >= 0);
+assert.ok(html.indexOf('id="photos"') >= 0 && html.indexOf("Download photos") >= 0);
 assert.ok(html.indexOf('id="csv"') >= 0 && html.indexOf("Download CSV") >= 0);
 assert.ok(html.indexOf('data-a="pdf"') >= 0, "history view should have a PDF button next to CSV");
+assert.ok(html.indexOf('data-a="photos"') >= 0);
 assert.ok(html.indexOf('data-a="csv"') >= 0);
 assert.ok(html.indexOf("saveCsv(buildCsv()") >= 0, "CSV download must stay wired");
+assert.ok(html.indexOf('"Photo #"') >= 0 && html.indexOf('"Photo Status"') >= 0 && html.indexOf('"Original File"') >= 0 && html.indexOf('"Defect"') >= 0);
+assert.ok(html.indexOf("indexedDB.open") >= 0 && html.indexOf("1600") >= 0, "hi-res photos go to IndexedDB");
 assert.ok(html.indexOf("pagesFromFails") >= 0);
 assert.ok(html.indexOf("navigator.share") >= 0);
 assert.ok(html.indexOf("a.download=filename") >= 0, "share fallback is a blob download link");
-assert.ok(sw.indexOf("tbw-v2") >= 0, "service worker cache version should be bumped");
-assert.ok(sw.indexOf("pdf-report.js") >= 0, "service worker should precache the PDF builder");
-assert.ok(!/cdn\.|unpkg|jsdelivr|cdnjs/i.test(html + "\n" + sw + "\n" + fs.readFileSync(path.join(root, "pdf-report.js"), "utf8")));
+assert.ok(sw.indexOf("tbw-v3") >= 0, "service worker cache version should be bumped");
+assert.ok(sw.indexOf("pdf-report.js") >= 0 && sw.indexOf("zip-store.js") >= 0, "service worker should precache PDF and zip");
+assert.ok(!/cdn\.|unpkg|jsdelivr|cdnjs/i.test([html, sw, fs.readFileSync(path.join(root, "pdf-report.js"), "utf8"), fs.readFileSync(path.join(root, "zip-store.js"), "utf8")].join("\n")));
 
 var inline = html.match(/<script>\r?\n([\s\S]*)<\/script>\s*<\/body>/);
 assert.ok(inline, "inline app script");
@@ -105,6 +144,7 @@ var appPath = path.join(__dirname, ".app-syntax-check.js");
 fs.writeFileSync(appPath, inline[1]);
 execFileSync(process.execPath, ["--check", appPath]);
 execFileSync(process.execPath, ["--check", path.join(root, "pdf-report.js")]);
+execFileSync(process.execPath, ["--check", path.join(root, "zip-store.js")]);
 fs.unlinkSync(appPath);
 
 console.log("ok — 18-page sample PDF is " + bytes.length + " bytes; cap is " + TBW.MAX_PHOTOS + " photos");

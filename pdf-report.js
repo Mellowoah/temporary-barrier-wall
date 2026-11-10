@@ -9,7 +9,7 @@
 })(typeof window !== "undefined" ? window : (typeof global !== "undefined" ? global : this), function () {
   "use strict";
   var MAX_PHOTOS = 40;
-  var MAX_JPEG_BYTES = 400000;
+  var MAX_JPEG_BYTES = 2500000;
   var PAGE_W = 612;
   var PAGE_H = 792;
   /* Helvetica widths, glyph units of 1000, characters 32..126. */
@@ -94,12 +94,32 @@
   function metaLine(dateText, name) {
     return "Date: " + (dateText ? String(dateText) : "-") + "  |  Name: " + (name ? String(name) : "-");
   }
+  function photoNumText(n) {
+    var s = String(n);
+    while (s.length < 2) s = "0" + s;
+    return s;
+  }
   function photoCaption(index, staText) {
-    var n = String(index + 1);
     var sta = String(staText == null || staText === "" ? "Sta -" : staText).trim();
-    if (n.length < 2) n = "0" + n;
     if (sta.indexOf("Sta") !== 0) sta = "Sta " + sta;
-    return "Photo " + n + " | " + sta;
+    return "Photo " + photoNumText(index + 1) + " | " + sta;
+  }
+  /* Photo-01_Sta-1923+12.50.jpg — index is 0-based, same as photoCaption. */
+  function photoFileName(index, staText) {
+    var sta = String(staText == null ? "" : staText).trim().replace(/^sta\.?\s*/i, "");
+    sta = sta.replace(/[^\d.+-]/g, "");
+    if (!sta) sta = "unknown";
+    return "Photo-" + photoNumText(index + 1) + "_Sta-" + sta + ".jpg";
+  }
+  /* entries: [{id, hasImage}]. Numbers only rows that actually have a photo, in list order. */
+  function assignPhotoNums(entries) {
+    var map = {}, n = 0, i, e;
+    entries = entries || [];
+    for (i = 0; i < entries.length; i++) {
+      e = entries[i];
+      if (e && e.hasImage) { n++; map[e.id] = n; }
+    }
+    return map;
   }
   function pdfFilename(section, date) {
     var s = String(section == null ? "" : section).trim().toLowerCase();
@@ -181,7 +201,7 @@
         title: "TEMPORARY BARRIER WALL CHECK",
         sectionLine: sec,
         meta: meta,
-        caption: photoCaption(i, f.staText),
+        caption: f.caption ? String(f.caption) : photoCaption(f.photoNum != null ? Number(f.photoNum) - 1 : i, f.staText),
         details: details,
         jpeg: jpeg
       };
@@ -196,7 +216,7 @@
     drawText(cmds, text, size, bold, (PAGE_W - textWidth(text, size, bold)) / 2, y, color);
   }
   function pageContent(spec, pageNo, pageCount, imageName, info) {
-    var M = 40;
+    var M = 28;
     var maxW = PAGE_W - M * 2;
     var title = spec.title || "TEMPORARY BARRIER WALL CHECK";
     var sectionLines = wrapText(spec.sectionLine || "Section -", 14, true, maxW).slice(0, 3);
@@ -327,6 +347,9 @@
     photoCaption: photoCaption,
     sectionLine: sectionLine,
     pdfFilename: pdfFilename,
-    jpegInfo: jpegInfo
+    jpegInfo: jpegInfo,
+    photoNumText: photoNumText,
+    photoFileName: photoFileName,
+    assignPhotoNums: assignPhotoNums
   };
 });

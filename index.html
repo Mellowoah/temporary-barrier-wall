@@ -217,6 +217,8 @@ input[type=file]{display:none}
   <button class="block" id="copy">📋 Copy to clipboard</button>
   <button class="block" id="csv">⬇ Download CSV</button>
   <button class="block" id="pdf">⬇ Download PDF</button>
+  <button class="block" id="photos">⬇ Download photos</button>
+  <div id="saveBar" class="warn" hidden></div>
   <div class="hint" id="finHint"></div>
   <label class="f" for="endSta">End station (auto from last unit — edit to override)</label>
   <input type="text" id="endSta" autocomplete="off">
@@ -253,7 +255,7 @@ input[type=file]{display:none}
   <img class="thumb" id="dThumb" alt="Photo thumbnail" hidden>
   <div class="hint" style="margin:8px 0 4px">Photo taken?</div>
   <div class="seg" id="dPhoto"><button class="yes" data-v="1">Yes</button><button class="no" data-v="0">No</button></div>
-  <button class="hint" id="dRemove" style="min-height:44px;margin-top:8px;font-size:15px" hidden>Remove photo thumbnail</button>
+  <button class="hint" id="dRemove" style="min-height:44px;margin-top:8px;font-size:15px" hidden>Remove photo</button>
   <label class="f" for="dSize">Size (in)</label>
   <input type="text" id="dSize" inputmode="decimal" autocomplete="off" placeholder="inches">
   <label class="f">Location (tap all that apply)</label>
@@ -284,6 +286,7 @@ input[type=file]{display:none}
 <div class="toast" id="toast" hidden></div>
 
 <script src="pdf-report.js"></script>
+<script src="zip-store.js"></script>
 <script>
 (function(){
 "use strict";
@@ -416,7 +419,7 @@ function sorted(){return S.entries.slice().sort(function(a,b){return a.unit-b.un
 function entryLine(e){
   var d=DEFS.filter(function(x){return e.defects.indexOf(x.k)>=0}).map(function(x){return x.label}).join("; ");
   var sz=(e.size===""||e.size==null)?"-":(e.size+" in");
-  return (isPri(e)?"PRIORITY >> ":"")+["Unit "+unitLabel(e),staTxt(entrySta(e)),fmtFt(entryFt(e)),d,sz,locText(e.loc),"Photo "+(e.photo?"yes":"no")].concat(e.note?["Note: "+String(e.note).replace(/\|/g,"/")]:[]).join(" | ");
+  return (isPri(e)?"PRIORITY >> ":"")+["Unit "+unitLabel(e),staTxt(entrySta(e)),fmtFt(entryFt(e)),d,sz,locText(e.loc),photoTag(e)].concat(e.note?["Note: "+String(e.note).replace(/\|/g,"/")]:[]).join(" | ");
 }
 function lm(sta,land){var a=[];if(sta!=null)a.push(staTxt(sta));if(land)a.push(land);return a.length?a.join(" - "):"-"}
 function buildMsg(){
@@ -462,9 +465,20 @@ function buildMsgLot(){
   return o.join("\n");
 }
 function csvEsc(s){s=String(s);return /[",\n\r]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s}
+function entryHasImage(e){return !!(e&&(e.thumb||e.hires))}
+function photoNums(){
+  if(!window.TBWPdf)return {};
+  return TBWPdf.assignPhotoNums(sorted().map(function(e){return {id:e.id,hasImage:entryHasImage(e)}}));
+}
+function photoTag(e){
+  var n=photoNums()[e.id];
+  if(n&&window.TBWPdf)return "Photo "+TBWPdf.photoNumText(n);
+  return "Photo "+(e.photo?"yes":"no");
+}
+function defectText(e){return DEFS.filter(function(d){return e.defects.indexOf(d.k)>=0}).map(function(d){return d.label}).join("; ")}
 function buildCsv(){
-  var lot=isLot();
-  var head=(lot?["Lot"]:[]).concat(["Unit","Station","Footage (+ft)","Result"],DEFS.map(function(d){return d.col}),["Size (in)","Location","Photo","Note"]);
+  var lot=isLot(),nums=photoNums();
+  var head=(lot?["Lot"]:[]).concat(["Unit","Station","Footage (+ft)","Result"],DEFS.map(function(d){return d.col}),["Size (in)","Location","Photo","Note","Photo #","Photo Status","Defect","Original File"]);
   var rows=[head],items=[];
   S.entries.forEach(function(e){items.push({u:e.unit,id:e.id,e:e})});
   if(S.csvAll){
@@ -475,12 +489,73 @@ function buildCsv(){
   items.forEach(function(it){
     var e=it.e,sta=e?entrySta(e):unitSta(it.u),lt=lot?lotFor(it.u):null;
     var pre=lot?[lt?lt.n:""]:[];
-    var base=pre.concat([lt?it.u-lt.first+1:it.u,sta==null?"":fmtSta(sta),fmtFt(e?entryFt(e):unitFt(it.u)),e?"FAIL":(lot?"PASS (assumed)":"OK")]);
-    if(e)rows.push(base.concat(DEFS.map(function(d){return e.defects.indexOf(d.k)>=0?"X":""}),[e.size==null?"":e.size,locText(e.loc)==="-"?"":locText(e.loc),e.photo?"Yes":"No",e.note||""]));
-    else rows.push(base.concat(DEFS.map(function(){return ""}),["","","",""]));
+    var staBody=sta==null?"":fmtSta(sta);
+    var base=pre.concat([lt?it.u-lt.first+1:it.u,staBody,fmtFt(e?entryFt(e):unitFt(it.u)),e?"FAIL":(lot?"PASS (assumed)":"OK")]);
+    var flags=DEFS.map(function(d){return e&&e.defects.indexOf(d.k)>=0?"X":""});
+    if(!e){rows.push(base.concat(flags,["","","","","","","",""]));return}
+    var n=nums[e.id]||0;
+    var photoNo=n&&window.TBWPdf?TBWPdf.photoNumText(n):"";
+    var status=n?"Captured":"Picture Not Captured";
+    var orig=n&&window.TBWPdf?TBWPdf.photoFileName(n-1,sta==null?"":("Sta "+staBody)):"";
+    rows.push(base.concat(flags,[e.size==null?"":e.size,locText(e.loc)==="-"?"":locText(e.loc),e.photo?"Yes":"No",e.note||"",photoNo,status,defectText(e),orig]));
   });
   return rows.map(function(r){return r.map(csvEsc).join(",")}).join("\r\n")+"\r\n";
 }
+
+/* ---------- full-size photos (IndexedDB; thumbs stay in localStorage) ---------- */
+var PHOTO_DB="barrierCheck.photos", PHOTO_STORE="photos", photoMem={}, photoGen=0, pendingAttach=null;
+function idbRun(fn, cb){
+  var req;
+  try{req=indexedDB.open(PHOTO_DB,1)}catch(e){if(cb)cb(null);return}
+  req.onupgradeneeded=function(){var db=req.result;if(!db.objectStoreNames.contains(PHOTO_STORE))db.createObjectStore(PHOTO_STORE)};
+  req.onerror=function(){if(cb)cb(null)};
+  req.onsuccess=function(){
+    var db=req.result;
+    try{fn(db,function(result){try{db.close()}catch(e2){}if(cb)cb(result)})}
+    catch(err){try{db.close()}catch(e3){}if(cb)cb(null)}
+  };
+}
+function idbPut(key, bytes, cb){
+  photoMem[key]=bytes;
+  var blob=new Blob([bytes],{type:"image/jpeg"});
+  idbRun(function(db, done){
+    var tx=db.transaction(PHOTO_STORE,"readwrite");
+    tx.objectStore(PHOTO_STORE).put(blob, key);
+    tx.oncomplete=function(){done(true)};
+    tx.onerror=function(){done(false)};
+  }, cb);
+}
+function idbGet(key, cb){
+  if(photoMem[key]){cb(photoMem[key]);return}
+  idbRun(function(db, done){
+    var g=db.transaction(PHOTO_STORE,"readonly").objectStore(PHOTO_STORE).get(key);
+    g.onsuccess=function(){done(g.result||null)};
+    g.onerror=function(){done(null)};
+  }, function(v){
+    if(!v){cb(null);return}
+    if(v instanceof Uint8Array){photoMem[key]=v;cb(v);return}
+    blobToBytes(v, function(b){if(b&&b.length)photoMem[key]=b;cb(b&&b.length?b:null)});
+  });
+}
+function idbDel(key, cb){
+  delete photoMem[key];
+  idbRun(function(db, done){
+    var tx=db.transaction(PHOTO_STORE,"readwrite");
+    tx.objectStore(PHOTO_STORE).delete(key);
+    tx.oncomplete=function(){done(true)};
+    tx.onerror=function(){done(false)};
+  }, cb);
+}
+function idbClear(cb){
+  photoMem={};
+  idbRun(function(db, done){
+    var tx=db.transaction(PHOTO_STORE,"readwrite");
+    tx.objectStore(PHOTO_STORE).clear();
+    tx.oncomplete=function(){done(true)};
+    tx.onerror=function(){done(false)};
+  }, cb);
+}
+function forgetPhoto(id){if(id==null)return;idbDel(id)}
 
 /* ---------- toast / tabs ---------- */
 var tt;function toast(m){var t=$("toast");t.textContent=m;t.hidden=false;clearTimeout(tt);tt=setTimeout(function(){t.hidden=true},2200)}
@@ -561,7 +636,7 @@ function newCheck(){
   var warn=hasData()?"Start a NEW check?\n\nThis clears the current walk from the screen. A copy of this check (text + CSV, without photos) is saved first under Past checks.\n\nSend or copy your log before you do this!":"Start a NEW check? (Nothing has been logged yet.)";
   if(!confirm(warn))return;
   var saved=archive(),k={name:S.name,section:S.section,phone:S.phone,email:S.email,dir:S.dir,unitLen:S.unitLen,lotLen:S.lotLen,mode:S.mode};
-  S=fresh();Object.keys(k).forEach(function(x){S[x]=k[x]});save();loadSetup();refreshHistBtn();show("setup");toast(saved?"Saved to Past checks. New check started":"New check started");
+  S=fresh();Object.keys(k).forEach(function(x){S[x]=k[x]});idbClear();save();loadSetup();refreshHistBtn();show("setup");toast(saved?"Saved to Past checks. New check started":"New check started");
 }
 $("newCheck").onclick=newCheck;$("newCheck2").onclick=newCheck;
 
@@ -666,12 +741,12 @@ function undo(){
   if(h.t==="fail"){var ue=S.entries.filter(function(e){return e.id===h.id})[0];
     if(ue&&!confirm("Undo the FAIL on unit "+unitLabel(ue)+"? That fail entry"+(ue.thumb?" and its photo":"")+" will be deleted."))return}
   if(h.t==="next"){var nl=S.lots[S.lots.length-1];if(nl&&nl.n===h.lot&&lotFailUnits(nl)&&!confirm("Undo the start of Lot "+h.lot+"? Its flagged fails will be deleted too."))return;
-    if(nl&&nl.n===h.lot){S.entries=S.entries.filter(function(e){return e.unit<nl.first});for(var u in S.units)if(Number(u)>=nl.first)delete S.units[u]}}
+    if(nl&&nl.n===h.lot){S.entries.filter(function(e){return e.unit>=nl.first}).forEach(function(e){forgetPhoto(e.id)});S.entries=S.entries.filter(function(e){return e.unit<nl.first});for(var u in S.units)if(Number(u)>=nl.first)delete S.units[u]}}
   S.hist.pop();
   if(h.t==="close"){var cl=S.lots.filter(function(x){return x.n===h.lot})[0];if(cl){cl.closed=false;cl.count=null}}
   else if(h.t==="next"){if(S.lots.length&&S.lots[S.lots.length-1].n===h.lot)S.lots.pop()}
   else{
-    if(h.t==="fail")S.entries=S.entries.filter(function(e){return e.id!==h.id});
+    if(h.t==="fail"){forgetPhoto(h.id);S.entries=S.entries.filter(function(e){return e.id!==h.id})}
     if(h.prev)S.units[h.unit]=h.prev;else delete S.units[h.unit];
   }
   S.cur=h.prevCur;buzz(20);renderWalk();save();toast("Undone");
@@ -687,11 +762,11 @@ $("skip1").onclick=function(){setCur(S.cur+1)};
 /* ---------- fail sheet ---------- */
 var D=null;
 function ctxFor(u){if(!isLot())return {first:1,count:null,n:0};var l=lotFor(u)||curLot();return {first:l.first,count:lotCount(l),n:l.n}}
-function newDraft(unit){var c=ctxFor(unit);return {id:null,unit:unit,unitTxt:String(unit-c.first+1),lotFirst:c.first,lotCount:c.count,lotN:c.n,note:"",defects:[],size:"",loc:[],photo:false,thumb:"",fromWalk:true,prevCur:S.cur}}
+function newDraft(unit){var c=ctxFor(unit);return {id:null,unit:unit,unitTxt:String(unit-c.first+1),lotFirst:c.first,lotCount:c.count,lotN:c.n,note:"",defects:[],size:"",loc:[],photo:false,thumb:"",hiresTouched:false,photoCleared:false,fromWalk:true,prevCur:S.cur}}
 function openSheet(id,unit){
   if(id==null){D=newDraft(unit)}
   else{var e=S.entries.filter(function(x){return x.id===id})[0];if(!e)return;
-    var c=ctxFor(e.unit);D={id:e.id,unit:e.unit,unitTxt:String(e.unit-c.first+1),lotFirst:c.first,lotCount:c.count,lotN:c.n,note:e.note||"",ft:e.ft,defects:e.defects.slice(),size:e.size,loc:e.loc.slice(),photo:e.photo,thumb:e.thumb||"",fromWalk:false,prevCur:S.cur}}
+    var c=ctxFor(e.unit);D={id:e.id,unit:e.unit,unitTxt:String(e.unit-c.first+1),lotFirst:c.first,lotCount:c.count,lotN:c.n,note:e.note||"",ft:e.ft,defects:e.defects.slice(),size:e.size,loc:e.loc.slice(),photo:e.photo,thumb:e.thumb||"",hires:!!e.hires,hiresTouched:false,photoCleared:false,fromWalk:false,prevCur:S.cur}}
   $("toast").hidden=true;S.draft=D;save();drawSheet();$("sheet").hidden=false;$("sheet").scrollTop=0;
 }
 function drawInfo(){
@@ -721,20 +796,42 @@ $("dSize").addEventListener("input",function(){D.size=this.value;keepDraft()});
 $("dDef").addEventListener("click",function(e){var b=e.target.closest("button");if(!b)return;var k=b.getAttribute("data-k"),i=D.defects.indexOf(k);if(i>=0)D.defects.splice(i,1);else D.defects.push(k);b.setAttribute("aria-pressed",String(i<0));drawPri();keepDraft()});
 $("dLoc").addEventListener("click",function(e){var b=e.target.closest("button");if(!b)return;var k=b.getAttribute("data-l"),i=D.loc.indexOf(k);if(i>=0)D.loc.splice(i,1);else D.loc.push(k);b.setAttribute("aria-pressed",String(i<0));keepDraft()});
 $("dPhoto").addEventListener("click",function(e){var b=e.target.closest("button");if(!b)return;D.photo=b.getAttribute("data-v")==="1";drawPhoto();keepDraft()});
-$("dRemove").onclick=function(){D.thumb="";drawPhoto();keepDraft()};
+$("dRemove").onclick=function(){D.thumb="";D.photoCleared=true;D.hiresTouched=true;delete photoMem.draft;idbDel("draft");drawPhoto();keepDraft()};
+function jpegDataUrl(img, maxEdge, quality){
+  var w=img.naturalWidth||img.width||1,h=img.naturalHeight||img.height||1,s=Math.min(1,maxEdge/Math.max(w,h));
+  var c=document.createElement("canvas");c.width=Math.max(1,Math.round(w*s));c.height=Math.max(1,Math.round(h*s));
+  c.getContext("2d").drawImage(img,0,0,c.width,c.height);
+  try{return c.toDataURL("image/jpeg",quality)}catch(e){return ""}
+}
+function canvasJpeg(img, maxEdge, quality, cb){
+  var w=img.naturalWidth||img.width||1,h=img.naturalHeight||img.height||1,s=Math.min(1,maxEdge/Math.max(w,h));
+  var c=document.createElement("canvas");c.width=Math.max(1,Math.round(w*s));c.height=Math.max(1,Math.round(h*s));
+  c.getContext("2d").drawImage(img,0,0,c.width,c.height);
+  c.toBlob(function(b){if(!b){cb(null);return}blobToBytes(b,cb)},"image/jpeg",quality);
+}
 $("dFile").addEventListener("change",function(){
   var f=this.files&&this.files[0];if(!f)return;var inp=this;
   var url=URL.createObjectURL(f),img=new Image();
   img.onload=function(){
-    var M=640,w=img.naturalWidth,h=img.naturalHeight,s=Math.min(1,M/Math.max(w,h)),c=document.createElement("canvas");
-    c.width=Math.max(1,Math.round(w*s));c.height=Math.max(1,Math.round(h*s));
-    c.getContext("2d").drawImage(img,0,0,c.width,c.height);
-    D.thumb=c.toDataURL("image/jpeg",0.6);D.photo=true;URL.revokeObjectURL(url);inp.value="";drawPhoto();keepDraft();toast("Photo saved (compressed)");
+    var thumb=jpegDataUrl(img,640,0.6);
+    URL.revokeObjectURL(url);inp.value="";
+    if(thumb){D.thumb=thumb;D.photo=true;D.photoCleared=false;D.hiresTouched=true;drawPhoto();keepDraft()}
+    else{D.photo=true;drawPhoto();keepDraft();toast("Couldn't make a thumbnail — marked Photo yes");return}
+    var gen=++photoGen; D._photoGen=gen;
+    canvasJpeg(img,1600,0.8,function(bytes){
+      if(!bytes){toast("Photo saved (small copy only)");return}
+      if(D&&D._photoGen===gen){photoMem.draft=bytes;idbPut("draft",bytes,function(ok){toast(ok?"Photo saved":"Photo saved (small copy only — full photo couldn't be stored)")});return}
+      if(pendingAttach&&pendingAttach.gen===gen){
+        var pid=pendingAttach.id; pendingAttach=null;
+        photoMem[pid]=bytes;
+        idbPut(pid,bytes,function(ok){var cur=S.entries.filter(function(x){return x.id===pid})[0];if(cur&&ok){cur.hires=true;save()}else toast("Photo saved (small copy only — full photo couldn't be stored)")});
+      }
+    });
   };
-  img.onerror=function(){URL.revokeObjectURL(url);D.photo=true;inp.value="";drawPhoto();keepDraft();toast("Couldn't make a thumbnail — marked Photo yes")};
+  img.onerror=function(){URL.revokeObjectURL(url);D.photo=true;inp.value="";drawPhoto();keepDraft();toast("Couldn't read that photo — marked Photo yes")};
   img.src=url;
 });
-function closeSheet(){$("sheet").hidden=true;D=null;S.draft=null;save()}
+function closeSheet(keepPending){if(!keepPending)pendingAttach=null;delete photoMem.draft;idbDel("draft");$("sheet").hidden=true;D=null;S.draft=null;save()}
 $("dCancel").onclick=function(){
   if(D&&D.dirty&&(D.defects.length||D.thumb||D.size!==""||D.note||D.loc.length)&&!confirm("Discard this FAIL entry? What you entered (and any photo) will be lost."))return;
   closeSheet();
@@ -749,22 +846,27 @@ $("dSave").onclick=function(){
   if(sz==null||(sz!==""&&sz<0)){$("dErr").textContent="Size must be a number of inches (or leave blank).";return}
   if(S.entries.some(function(e){return e.unit===u&&e.id!==D.id})&&!confirm("Unit "+ulocal+" already has a FAIL logged. Add another one for the same unit?"))return;
   var old=D.id==null?null:S.entries.filter(function(x){return x.id===D.id})[0];
-  var e={id:D.id==null?S.nid++:D.id,unit:u,defects:DEFS.filter(function(d){return D.defects.indexOf(d.k)>=0}).map(function(d){return d.k}),size:sz,loc:LOCS.filter(function(l){return D.loc.indexOf(l)>=0}),photo:D.photo,thumb:D.thumb,note:String(D.note||"").trim()};
+  var e={id:D.id==null?S.nid++:D.id,unit:u,defects:DEFS.filter(function(d){return D.defects.indexOf(d.k)>=0}).map(function(d){return d.k}),size:sz,loc:LOCS.filter(function(l){return D.loc.indexOf(l)>=0}),photo:D.photo,thumb:D.thumb,note:String(D.note||"").trim(),hires:false};
+  if(D.photoCleared){forgetPhoto(e.id);delete photoMem.draft;idbDel("draft");pendingAttach=null}
+  else if(D.hiresTouched&&photoMem.draft){e.hires=true;var hi=photoMem.draft;photoMem[e.id]=hi;idbPut(e.id,hi,function(ok){if(ok)return;var cur=S.entries.filter(function(x){return x.id===e.id})[0];if(cur&&cur.hires){cur.hires=false;save()}});delete photoMem.draft;idbDel("draft");pendingAttach=null}
+  else if(D.hiresTouched){pendingAttach={id:e.id,gen:D._photoGen}}
+  else if(old&&old.hires)e.hires=true;
   if(old&&old.unit===u&&old.ft!=null)e.ft=old.ft;
   var prev=S.units[u]||null;
   if(old)S.entries=S.entries.map(function(x){return x.id===e.id?e:x});else S.entries.push(e);
   if(old&&old.unit!==u&&!S.entries.some(function(x){return x.unit===old.unit}))delete S.units[old.unit];
   S.units[u]="fail";
   if(D.fromWalk){pushHist({t:"fail",unit:u,id:e.id,prev:prev,prevCur:D.prevCur});S.cur=isLot()?Math.min(u+1,lotLast(lotFor(u)||curLot())):u+1}
-  var pri=isPri(e);closeSheet();buzz(pri?[80,50,80,50,80]:[60,40,60]);
+  var pri=isPri(e);closeSheet(!!pendingAttach);buzz(pri?[80,50,80,50,80]:[60,40,60]);
   if(S.tab==="walk")renderWalk();else if(S.tab==="log")renderLog();
   toast("FAIL logged: unit "+ulocal+(pri?" — PRIORITY, call now":""));
 };
 
 /* ---------- log ---------- */
 function entryCard(e){
+  var pn=photoNums()[e.id],ptxt=pn&&window.TBWPdf?TBWPdf.photoNumText(pn):"";
   return '<div class="entry'+(isPri(e)?" pri":"")+'"><div class="ft">Unit '+unitLabel(e)+'</div><div class="info">'+
-    '<div style="font-weight:900;font-size:17px">'+esc(staTxt(entrySta(e)))+' · '+esc(fmtFt(entryFt(e)))+' ft</div>'+
+    '<div style="font-weight:900;font-size:17px">'+esc(staTxt(entrySta(e)))+' · '+esc(fmtFt(entryFt(e)))+' ft'+(ptxt?' · Photo '+esc(ptxt):"")+'</div>'+
     (isPri(e)?'<div style="color:var(--red);font-weight:900">PRIORITY — call supervisor</div>':"")+
     e.defects.map(function(k){return '<span class="tag'+(k==="base"?" r":"")+'">'+esc(defLabel(k))+'</span>'}).join("")+
     '<div>Size: <b>'+(e.size===""||e.size==null?"-":esc(e.size)+" in")+'</b> · Loc: <b>'+esc(locText(e.loc))+'</b> · Photo: <b>'+(e.photo?"yes":"no")+'</b></div>'+
@@ -805,6 +907,7 @@ $("logList").addEventListener("click",function(ev){
   if(ed)openSheet(Number(ed));
   if(del){var id=Number(del),e=S.entries.filter(function(x){return x.id===id})[0];
     if(e&&confirm("Delete the FAIL on unit "+unitLabel(e)+"? That unit will go back to "+(isLot()?"assumed pass":"'not checked'")+".")){
+      forgetPhoto(id);
       S.entries=S.entries.filter(function(x){return x.id!==id});
       if(!S.entries.some(function(x){return x.unit===e.unit}))delete S.units[e.unit];
       save();renderLog()}}
@@ -843,7 +946,7 @@ function renderFin(keepInputs){
   $("msg").textContent=buildMsg();$("sms").setAttribute("href",smsHref());$("mail").setAttribute("href",mailHref());
   var ph=S.entries.filter(function(e){return e.thumb}).length,canShare=!!navigator.share;
   $("share").style.display=canShare?"flex":"none";
-  $("finHint").textContent=(canShare?"Share sheet attaches "+ph+" photo thumbnail"+(ph===1?"":"s")+" when your phone supports it. ":"Share sheet isn't available in this browser — use Text or Copy. ")+"Text and Email send words only (no photos). Download PDF is one letter page per fail, up to "+(window.TBWPdf?TBWPdf.MAX_PHOTOS:40)+" photos."+(S.phone||S.email?"":" Add the supervisor phone/email under Setup → Settings to address them automatically.");
+  $("finHint").textContent=(canShare?"Share sheet attaches "+ph+" photo thumbnail"+(ph===1?"":"s")+" when your phone supports it. ":"Share sheet isn't available in this browser — use Text or Copy. ")+"Text and Email send words only (no photos). Download PDF and Download photos use the larger saved photo when there is one (otherwise the thumbnail), up to "+(window.TBWPdf?TBWPdf.MAX_PHOTOS:40)+", numbered Photo 01, Photo 02, … to match the CSV Photo # column."+(S.phone||S.email?"":" Add the supervisor phone/email under Setup → Settings to address them automatically.");
   updNav();
 }
 function dataToFile(du,name){var p=du.split(","),m=/:(.*?);/.exec(p[0])[1],bin=atob(p[1]),a=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)a[i]=bin.charCodeAt(i);return new File([a],name,{type:m})}
@@ -862,85 +965,184 @@ function dataUrlToBytes(du){
   var bin; try{bin=atob(du.slice(i+1))}catch(e){return null}
   var a=new Uint8Array(bin.length); for(var k=0;k<bin.length;k++)a[k]=bin.charCodeAt(k)&255; return a;
 }
-function collectPdfFails(){
-  return sorted().map(function(e){
-    var d=DEFS.filter(function(x){return e.defects.indexOf(x.k)>=0}).map(function(x){return x.label}).join("; ");
-    var sz=(e.size===""||e.size==null)?"":(e.size+" in");
-    var loc=locText(e.loc);
-    var unit="Unit "+unitLabel(e), lt=isLot()?lotFor(e.unit):null;
-    if(lt)unit="Lot "+lt.n+" | "+unit;
-    return {jpeg:e.thumb?dataUrlToBytes(e.thumb):null, staText:staTxt(entrySta(e)), unitText:unit, defectsText:d, sizeText:sz, locText:loc==="-"?"":loc, note:e.note||"", priority:isPri(e)};
-  });
+function failRecord(e, staText, photoNum, jpeg){
+  var d=defectText(e);
+  var sz=(e.size===""||e.size==null)?"":(e.size+" in");
+  var loc=locText(e.loc);
+  var unit="Unit "+unitLabel(e), lt=isLot()?lotFor(e.unit):null;
+  if(lt)unit="Lot "+lt.n+" | "+unit;
+  var lib=window.TBWPdf;
+  var caption=photoNum&&lib?lib.photoCaption(photoNum-1, staText):("No photo | "+staText);
+  return {jpeg:jpeg, staText:staText, unitText:unit, defectsText:d, sizeText:sz, locText:loc==="-"?"":loc, note:e.note||"", priority:isPri(e), photoNum:photoNum||null, caption:caption};
 }
 function blobToBytes(blob, cb){
+  if(!blob){cb(null);return}
   var r=new FileReader();
   r.onload=function(){cb(new Uint8Array(r.result))};
   r.onerror=function(){cb(null)};
   r.readAsArrayBuffer(blob);
 }
-function compressJpegBytes(bytes, cb){
+function loadEntryJpeg(e, cb){
+  function thumb(){cb(e.thumb?dataUrlToBytes(e.thumb):null)}
+  if(e.hires)idbGet(e.id, function(bytes){if(bytes&&bytes.length)cb(bytes);else thumb()});
+  else thumb();
+}
+function burnJpeg(bytes, label, quality, cb){
   var url=URL.createObjectURL(new Blob([bytes],{type:"image/jpeg"})), img=new Image();
   img.onload=function(){
-    var edge=1400, w=img.naturalWidth||1, h=img.naturalHeight||1, s=Math.min(1, edge/Math.max(w,h));
-    var c=document.createElement("canvas"); c.width=Math.max(1,Math.round(w*s)); c.height=Math.max(1,Math.round(h*s));
-    var g=c.getContext("2d"); g.fillStyle="#fff"; g.fillRect(0,0,c.width,c.height); g.drawImage(img,0,0,c.width,c.height);
+    var w=img.naturalWidth||1,h=img.naturalHeight||1,c=document.createElement("canvas");
+    c.width=w;c.height=h;
+    var g=c.getContext("2d");
+    g.drawImage(img,0,0,w,h);
+    var bar=Math.max(28, Math.round(h*0.065));
+    if(bar>h*0.2)bar=Math.round(h*0.2);
+    g.fillStyle="rgba(0,0,0,0.82)";
+    g.fillRect(0, h-bar, w, bar);
+    var size=Math.max(12, Math.round(bar*0.46));
+    g.fillStyle="#fff";
+    g.textBaseline="middle";
+    g.font="bold "+size+"px Helvetica, Arial, sans-serif";
+    while(size>10&&g.measureText(label).width>w-bar*0.6){size-=2;g.font="bold "+size+"px Helvetica, Arial, sans-serif"}
+    g.fillText(label, Math.round(bar*0.28), h-bar/2);
     URL.revokeObjectURL(url);
-    c.toBlob(function(b){ if(!b){cb(bytes);return} blobToBytes(b,function(out){cb(out&&out.length?out:bytes)}) }, "image/jpeg", 0.72);
+    c.toBlob(function(b){if(!b){cb(null);return}blobToBytes(b,cb)},"image/jpeg",quality==null?0.85:quality);
   };
-  img.onerror=function(){URL.revokeObjectURL(url); cb(null)};
+  img.onerror=function(){URL.revokeObjectURL(url);cb(null)};
   img.src=url;
 }
-function compressPdfFails(fails, cb){
-  var i=0;
-  (function step(){
-    if(i>=fails.length){cb(fails);return}
-    var f=fails[i++];
-    if(!f.jpeg||f.jpeg.length<=350000){step();return}
-    compressJpegBytes(f.jpeg, function(out){ f.jpeg=out; step(); });
-  })();
+function withLabel(bytes, label, cb){
+  if(!bytes||!label){cb(bytes||null);return}
+  burnJpeg(bytes, label, 0.85, function(out){
+    if(out&&out.length>1800000)burnJpeg(bytes, label, 0.7, function(out2){cb(out2||out)});
+    else cb(out||bytes);
+  });
 }
-function deliverPdf(bytes, filename, note, done){
-  var blob=new Blob([bytes],{type:"application/pdf"});
-  var file=null; try{file=new File([blob], filename, {type:"application/pdf"})}catch(e){}
-  function finish(msg){ toast(msg); if(done)done(); }
+function isIOS(){return /iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1)}
+function showSaveBar(file, blob, filename, note, done){
+  var bar=$("saveBar"); if(!bar){if(done)done();return}
+  bar.hidden=false;
+  bar.innerHTML="<b>"+esc(note||"File ready.")+"</b><br>"+esc(filename)+'<button class="primary block" id="saveBarGo" type="button">Tap to save</button>';
+  $("saveBarGo").onclick=function(){
+    function clickBlob(){
+      var u=URL.createObjectURL(blob), a=document.createElement("a");
+      a.href=u; a.download=filename; document.body.appendChild(a); a.click();
+      setTimeout(function(){document.body.removeChild(a);URL.revokeObjectURL(u)},4000);
+      bar.hidden=true; toast("Download started"); if(done)done();
+    }
+    if(file&&navigator.share){
+      navigator.share({files:[file], title:filename}).then(function(){bar.hidden=true;toast("Saved from the share sheet");if(done)done()}, function(err){
+        if(err&&err.name==="AbortError")return;
+        clickBlob();
+      });
+    }else clickBlob();
+  };
+  if(done)done();
+}
+function deliverFile(bytes, filename, mime, note, done){
+  var blob=new Blob([bytes],{type:mime});
+  var file=null; try{file=new File([blob], filename, {type:mime})}catch(e){}
+  function finish(msg){toast(msg); if(done)done()}
   function linked(){
     var u=URL.createObjectURL(blob), a=document.createElement("a");
     a.href=u; a.download=filename; document.body.appendChild(a); a.click();
     setTimeout(function(){document.body.removeChild(a); URL.revokeObjectURL(u)}, 4000);
-    finish((note?note+" ":"")+"PDF downloaded");
+    finish((note?note+" ":"")+"Download started");
   }
   if(file&&navigator.share){
     var data={files:[file], title:filename}, can=false;
     try{can=!navigator.canShare||navigator.canShare(data)}catch(e){can=false}
     if(can){
-      navigator.share(data).then(function(){finish((note?note+" ":"")+"PDF ready — save it from the share sheet")}, function(err){
-        if(err&&err.name==="AbortError"){ if(done)done(); return; }
-        linked();
+      navigator.share(data).then(function(){finish((note?note+" ":"")+"Ready — save it from the share sheet")}, function(err){
+        if(err&&err.name==="AbortError"){if(done)done();return}
+        if(isIOS())showSaveBar(file, blob, filename, note||"Couldn't open the share sheet.", done);
+        else linked();
       });
       return;
     }
   }
-  linked();
+  if(isIOS())showSaveBar(file, blob, filename, note||"Tap to save this file.", done);
+  else linked();
+}
+function deliverPdf(bytes, filename, note, done){deliverFile(bytes, filename, "application/pdf", note, done)}
+function eachEntry(list, fn, done){
+  var i=0;
+  (function step(){if(i>=list.length){done();return}var e=list[i++];fn(e, step)})();
 }
 function downloadCurrentPdf(){
   var lib=window.TBWPdf;
   if(!lib){toast("PDF builder didn't load. Open the app once while online, then it works offline."); return}
-  var fails=collectPdfFails();
-  if(!fails.length){toast("No fails logged yet. Flag a unit, then download the photo PDF."); return}
+  var all=sorted();
+  if(!all.length){toast("No fails logged yet. Flag a unit, then download the photo PDF."); return}
   var btn=$("pdf"); if(btn)btn.disabled=true;
-  function enable(){ if(btn)btn.disabled=false; }
-  function go(list){
-    try{
-      var built=lib.pagesFromFails(list,{section:S.section, dateText:fmtDate(S.date), name:S.name||""});
-      var bytes=lib.buildPhotoPdf({pages:built.pages});
-      var note=built.truncated?("First "+built.pages.length+" fails only (limit "+lib.MAX_PHOTOS+")."):"";
-      deliverPdf(bytes, lib.pdfFilename(S.section, S.date), note, enable);
-    }catch(err){ toast("Couldn't build the PDF"); enable(); }
+  var nums=photoNums(), list=all.slice(0, lib.MAX_PHOTOS), fails=[], i=0;
+  function enable(){if(btn)btn.disabled=false}
+  function step(){
+    if(i>=list.length){
+      try{
+        var built=lib.pagesFromFails(fails,{section:S.section, dateText:fmtDate(S.date), name:S.name||""});
+        var bytes=lib.buildPhotoPdf({pages:built.pages});
+        var note=all.length>list.length?("First "+list.length+" fails only (limit "+lib.MAX_PHOTOS+")."):"";
+        deliverPdf(bytes, lib.pdfFilename(S.section, S.date), note, enable);
+      }catch(err){toast("Couldn't build the PDF"); enable()}
+      return;
+    }
+    var e=list[i++], n=nums[e.id]||0, staText=staTxt(entrySta(e));
+    var label=n?lib.photoCaption(n-1, staText):"";
+    loadEntryJpeg(e, function(bytes){
+      var put=function(jpeg){fails.push(failRecord(e, staText, n, jpeg)); step()};
+      if(bytes&&label)withLabel(bytes, label, put); else put(bytes);
+    });
   }
-  if(fails.some(function(f){return f.jpeg&&f.jpeg.length>350000})){toast("Compressing photos…"); compressPdfFails(fails, go); return}
-  go(fails);
+  toast("Building PDF…");
+  step();
+}
+function photosZipName(){
+  var lib=window.TBWPdf;
+  if(!lib)return "barrier-wall-photos.zip";
+  return lib.pdfFilename(S.section, S.date).replace(/^barrier-wall-check/,"barrier-wall-photos").replace(/\.pdf$/,".zip");
+}
+function downloadPhotos(){
+  var lib=window.TBWPdf, zip=window.TBWZip;
+  if(!lib||!zip){toast("Photo export didn't load. Open the app once while online, then it works offline."); return}
+  var nums=photoNums();
+  var all=sorted().filter(function(e){return nums[e.id]});
+  if(!all.length){toast("No photos to download yet."); return}
+  var btn=$("photos"); if(btn)btn.disabled=true;
+  var cap=lib.MAX_PHOTOS, list=all.slice(0, cap), files=[], missed=0;
+  function enable(){if(btn)btn.disabled=false}
+  eachEntry(list, function(e, next){
+    var n=nums[e.id], staText=staTxt(entrySta(e));
+    var label=lib.photoCaption(n-1, staText), name=lib.photoFileName(n-1, staText);
+    loadEntryJpeg(e, function(bytes){
+      if(!bytes){missed++; next(); return}
+      withLabel(bytes, label, function(out){
+        if(out)files.push({name:name, data:out}); else missed++;
+        next();
+      });
+    });
+  }, function(){
+    if(!files.length){toast("Couldn't read the photos."); enable(); return}
+    var note=(all.length>list.length?("First "+list.length+" photos only (limit "+cap+")."):"")+(missed?(" "+missed+" missing."):"");
+    var shareFiles=[];
+    try{shareFiles=files.map(function(f){return new File([f.data], f.name, {type:"image/jpeg"})})}catch(e){shareFiles=[]}
+    var can=false;
+    try{can=shareFiles.length&&shareFiles.length<=15&&navigator.share&&(!navigator.canShare||navigator.canShare({files:shareFiles}))}catch(err){can=false}
+    if(can){
+      navigator.share({files:shareFiles, title:"Barrier wall photos"}).then(function(){toast((note?note+" ":"")+"Photos ready — save them from the share sheet"); enable()}, function(err){
+        if(err&&err.name==="AbortError"){enable(); return}
+        sendZip();
+      });
+      return;
+    }
+    sendZip();
+    function sendZip(){
+      try{deliverFile(zip.zipStore(files), photosZipName(), "application/zip", note, enable)}
+      catch(err){toast("Couldn't zip the photos"); enable()}
+    }
+  });
 }
 $("pdf").onclick=downloadCurrentPdf;
+$("photos").onclick=downloadPhotos;
 
 /* ---------- history ---------- */
 var HV=null;
@@ -957,6 +1159,7 @@ function histDraw(){
       '<a class="btn block" href="'+esc(mailHref(r.msg,"Temporary Barrier Wall "+fmtDate(r.date)+(r.section?" - "+r.section:"")))+'">✉ Email</a>'+
       '<button class="block" data-a="csv">⬇ Download CSV</button>'+
       '<button class="block" data-a="pdf">⬇ Download PDF</button>'+
+      '<button class="block" data-a="photos">⬇ Download photos</button>'+
       '<button class="block" data-a="del">🗑 Delete this past check</button>'+
       '<button class="block" data-a="back">← Back to list</button>';
   }else if(!H.length){
@@ -976,7 +1179,7 @@ $("hsBody").addEventListener("click",function(e){
   if(a==="copy")copyText(r.msg);
   if(a==="share")shareIt("Temporary Barrier Wall "+fmtDate(r.date),r.msg);
   if(a==="csv")saveCsv(r.csv,"barrier-log-"+(r.date||"check")+".csv");
-  if(a==="pdf")toast("Past checks keep the text and CSV only — photos aren't stored, so the photo PDF can't be rebuilt. Download it from Finish before you start a new check.");
+  if(a==="pdf"||a==="photos")toast("Past checks keep the text and CSV only — photos aren't stored. Download the PDF or photos from Finish before you start a new check.");
   if(a==="del"&&confirm("Delete this past check from History? This can't be undone.")){saveHist(H.filter(function(x){return x.id!==HV}));HV=null;histDraw();refreshHistBtn()}
 });
 $("hsClose").onclick=function(){$("histSheet").hidden=true};
@@ -1013,13 +1216,13 @@ try{var man={name:"Temporary Barrier Wall",short_name:"Temporary Barrier Wall",d
 
 /* ---------- boot ---------- */
 loadSetup();$("end").value=S.end;$("endSta").value=S.endSta;$("csvAll").checked=!!S.csvAll;updNav();
-if(S.draft){D=S.draft;if(D.lotFirst==null){D.lotFirst=1;D.lotCount=null;D.lotN=0}drawSheet();$("sheet").hidden=false}
+if(S.draft){D=S.draft;if(D.lotFirst==null){D.lotFirst=1;D.lotCount=null;D.lotN=0}if(D.hiresTouched==null)D.hiresTouched=false;if(D.photoCleared==null)D.photoCleared=false;drawSheet();$("sheet").hidden=false;if(D.hiresTouched&&!D.photoCleared)idbGet("draft",function(b){if(b)photoMem.draft=b})}
 show(S.tab||"setup");refreshHistBtn();
 var seen=false;try{seen=localStorage.getItem(GKEY)==="1"}catch(x){}
 if(!seen&&!hasData())gOpen();
 else if(hasData()){var wl=curLotSafe();toast("Welcome back — your check was restored"+(wl?" ("+wl+")":""))}
 function curLotSafe(){try{if(isLot()){var l=curLot();return "Lot "+l.n+", unit "+(S.cur-l.first+1)}return "unit "+S.cur}catch(x){return ""}}
-window.__app={get state(){return S},buildMsg:buildMsg,buildCsv:buildCsv,parseSta:parseSta,fmtSta:fmtSta,collectPdfFails:collectPdfFails,downloadCurrentPdf:downloadCurrentPdf};
+window.__app={get state(){return S},buildMsg:buildMsg,buildCsv:buildCsv,parseSta:parseSta,fmtSta:fmtSta,photoNums:photoNums,downloadCurrentPdf:downloadCurrentPdf,downloadPhotos:downloadPhotos,saveHires:function(id,bytes,cb){idbPut(id,bytes,cb)},loadHires:idbGet,burnLabel:burnJpeg};
 })();
 
 </script>
